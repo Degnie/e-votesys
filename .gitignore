@@ -1,0 +1,6 @@
+src/main/resources/config.properties
+target/
+build/
+dist/
+nbproject/private/
+nbactions.xml
