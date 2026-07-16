@@ -2,6 +2,9 @@
 -- RN01: valida padron (VOTER_ELECTION_STATUS) antes de habilitar el voto
 -- RN02: un votante emite un solo voto por eleccion (anti-duplicidad)
 -- VOTE no referencia al votante (anonimato); el vinculo voto-votante nunca se persiste
+--
+-- Requiere (ejecutar una vez como SYSTEM/DBA si el esquema EVOTESYS no tiene ya el privilegio):
+--   GRANT EXECUTE ON DBMS_CRYPTO TO EVOTESYS;
 
 CREATE OR REPLACE PACKAGE PKG_VOTING AS
 
@@ -72,7 +75,9 @@ CREATE OR REPLACE PACKAGE BODY PKG_VOTING AS
         END IF;
 
         SELECT SEQ_VOTE.NEXTVAL INTO p_id_vote FROM DUAL;
-        SELECT STANDARD_HASH(p_id_vote || p_election_id || p_candidate_id || SYSTIMESTAMP || DBMS_RANDOM.STRING('X', 16), 'SHA256')
+        -- RN: la entropia del hash debe ser criptografica, no el PRNG de proposito general DBMS_RANDOM
+        SELECT STANDARD_HASH(p_id_vote || p_election_id || p_candidate_id || SYSTIMESTAMP
+                             || RAWTOHEX(DBMS_CRYPTO.RANDOMBYTES(16)), 'SHA256')
         INTO v_hash FROM DUAL;
 
         INSERT INTO VOTE (ID_VOTE, VOTE_TIMESTAMP, HASH_CODE, ELECTION_ID_ELECTION, CANDIDATE_ID_CANDIDATE)

@@ -1,18 +1,12 @@
 package com.evotesys.ui;
 
-import com.evotesys.dao.CandidateDAO;
-import com.evotesys.dao.CandidateDAOImpl;
-import com.evotesys.dao.ElectionDAO;
-import com.evotesys.dao.ElectionDAOImpl;
-import com.evotesys.dao.VoteDAO;
-import com.evotesys.dao.VoteDAOImpl;
+import com.evotesys.controller.VotingController;
 import com.evotesys.model.Candidate;
 import com.evotesys.model.Election;
-import com.evotesys.model.Vote;
+import com.evotesys.service.VoteRequestDTO;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Font;
-import java.sql.SQLException;
 import java.util.List;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -32,24 +26,24 @@ import javax.swing.SwingUtilities;
 import javax.swing.border.EmptyBorder;
 
 /**
- * Boleta simulada: elige una elección publicada, selecciona un candidato de la lista y vota como
- * un votante dado. Cada voto sigue pasando por VoteDAOImpl -> SP_REGISTER_VOTE ->
- * PKG_VOTING.cast_vote, así que RN01/RN02 se siguen validando del lado de Oracle; esta ventana no
- * duplica ninguna regla de negocio, solo la presenta.
+ * Boleta simulada: elige una elección publicada, selecciona un candidato de la lista y vota
+ * presentando un Secure Token en lugar de tipear un ID de votante. Esta clase es una vista pasiva:
+ * no conoce VotingService ni los DAOs, solo dispara eventos hacia VotingController y expone
+ * {@link VotingView} para que el controller la actualice. Cada voto sigue pasando por
+ * VoteDAOImpl -> SP_REGISTER_VOTE -> PKG_VOTING.cast_vote, así que RN01/RN02 se siguen validando
+ * del lado de Oracle; esta ventana no duplica ninguna regla de negocio, solo la presenta.
  */
-public class VotingFrame extends javax.swing.JFrame {
+public class VotingFrame extends javax.swing.JFrame implements VotingView {
 
     private static final Color COLOR_EXITO = new Color(0, 128, 0);
     private static final Color COLOR_ERROR = new Color(178, 34, 34);
 
-    private final ElectionDAO electionDAO = new ElectionDAOImpl();
-    private final CandidateDAO candidateDAO = new CandidateDAOImpl();
-    private final VoteDAO voteDAO = new VoteDAOImpl();
+    private VotingController controller;
 
     private final JComboBox<Election> electionCombo = new JComboBox<>();
     private final DefaultListModel<Candidate> candidateListModel = new DefaultListModel<>();
     private final JList<Candidate> candidateList = new JList<>(candidateListModel);
-    private final JTextField voterIdField = new JTextField(12);
+    private final JTextField secureTokenField = new JTextField(16);
     private final JButton voteButton = new JButton("Emitir voto");
     private final JLabel statusLabel = new JLabel(" ");
 
@@ -57,7 +51,15 @@ public class VotingFrame extends javax.swing.JFrame {
         super("E-VoteSys - Boleta de votación");
         buildUi();
         wireActions();
-        loadElections();
+    }
+
+    public void setController(VotingController controller) {
+        this.controller = controller;
+    }
+
+    /** Composition root calls this once the controller is wired, kicking off the initial load. */
+    public void init() {
+        controller.loadElections();
     }
 
     private void buildUi() {
@@ -89,11 +91,12 @@ public class VotingFrame extends javax.swing.JFrame {
         JPanel footer = new JPanel();
         footer.setLayout(new BoxLayout(footer, BoxLayout.Y_AXIS));
 
-        JPanel voterRow = new JPanel(new BorderLayout(6, 0));
-        voterRow.add(new JLabel("ID Votante:"), BorderLayout.WEST);
-        voterRow.add(voterIdField, BorderLayout.CENTER);
-        voterRow.add(voteButton, BorderLayout.EAST);
-        footer.add(voterRow);
+        JPanel tokenRow = new JPanel(new BorderLayout(6, 0));
+        secureTokenField.setToolTipText("Formato: SVT-<id>-<nonce>, provisto por tu proveedor de identidad");
+        tokenRow.add(new JLabel("Secure Token:"), BorderLayout.WEST);
+        tokenRow.add(secureTokenField, BorderLayout.CENTER);
+        tokenRow.add(voteButton, BorderLayout.EAST);
+        footer.add(tokenRow);
 
         footer.add(Box.createVerticalStrut(8));
         statusLabel.setFont(statusLabel.getFont().deriveFont(Font.BOLD));
@@ -107,53 +110,31 @@ public class VotingFrame extends javax.swing.JFrame {
     }
 
     private void wireActions() {
-        electionCombo.addActionListener(e -> loadCandidatesForSelectedElection());
-        voteButton.addActionListener(e -> castVote());
-    }
-
-    private void loadElections() {
-        try {
-            List<Election> elections = electionDAO.findPublished();
-            electionCombo.setModel(new DefaultComboBoxModel<>(elections.toArray(new Election[0])));
-            if (elections.isEmpty()) {
-                setStatus("No hay elecciones publicadas todavía.", COLOR_ERROR);
+        electionCombo.addActionListener(e -> {
+            Election selected = (Election) electionCombo.getSelectedItem();
+            candidateListModel.clear();
+            if (selected != null) {
+                controller.loadCandidatesForElection(selected.getIdElection());
             }
-        } catch (SQLException e) {
-            setStatus("Error consultando elecciones: " + e.getMessage(), COLOR_ERROR);
-        }
+        });
+        voteButton.addActionListener(e -> requestVote());
     }
 
-    private void loadCandidatesForSelectedElection() {
-        Election selected = (Election) electionCombo.getSelectedItem();
-        candidateListModel.clear();
-        if (selected == null) {
-            return;
-        }
-        try {
-            List<Candidate> candidates = candidateDAO.findByElection(selected.getIdElection());
-            candidates.forEach(candidateListModel::addElement);
-        } catch (SQLException e) {
-            setStatus("Error consultando candidatos: " + e.getMessage(), COLOR_ERROR);
-        }
-    }
-
-    private void castVote() {
+    private void requestVote() {
         Election election = (Election) electionCombo.getSelectedItem();
         Candidate candidate = candidateList.getSelectedValue();
 
         if (election == null) {
-            setStatus("Selecciona una elección.", COLOR_ERROR);
+            showError("Selecciona una elección.");
             return;
         }
         if (candidate == null) {
-            setStatus("Selecciona un candidato de la lista.", COLOR_ERROR);
+            showError("Selecciona un candidato de la lista.");
             return;
         }
-        int voterId;
-        try {
-            voterId = Integer.parseInt(voterIdField.getText().trim());
-        } catch (NumberFormatException e) {
-            setStatus("ID Votante debe ser numérico.", COLOR_ERROR);
+        String secureToken = secureTokenField.getText().trim();
+        if (secureToken.isEmpty()) {
+            showError("Ingresa tu Secure Token.");
             return;
         }
 
@@ -164,13 +145,46 @@ public class VotingFrame extends javax.swing.JFrame {
             return;
         }
 
-        try {
-            Vote vote = new Vote(election.getIdElection(), candidate.getIdCandidate(), voterId);
-            voteDAO.registerVote(vote);
-            setStatus("Voto registrado correctamente (ID_VOTE=" + vote.getIdVote() + ").", COLOR_EXITO);
-        } catch (SQLException e) {
-            setStatus("Voto rechazado: " + e.getMessage(), COLOR_ERROR);
+        VoteRequestDTO request = new VoteRequestDTO(election.getIdElection(), candidate.getIdCandidate(), secureToken);
+        controller.castVote(request);
+    }
+
+    @Override
+    public void setLoading(boolean loading, String message) {
+        electionCombo.setEnabled(!loading);
+        candidateList.setEnabled(!loading);
+        voteButton.setEnabled(!loading);
+        secureTokenField.setEnabled(!loading);
+        if (loading) {
+            setStatus(message != null ? message : "Cargando...", statusLabel.getForeground());
         }
+    }
+
+    @Override
+    public void showElections(List<Election> elections) {
+        electionCombo.setModel(new DefaultComboBoxModel<>(elections.toArray(new Election[0])));
+        if (elections.isEmpty()) {
+            setStatus("No hay elecciones publicadas todavía.", COLOR_ERROR);
+        } else {
+            setStatus(" ", COLOR_EXITO);
+        }
+    }
+
+    @Override
+    public void showCandidates(List<Candidate> candidates) {
+        candidateListModel.clear();
+        candidates.forEach(candidateListModel::addElement);
+    }
+
+    @Override
+    public void showVoteSuccess(int idVote) {
+        setStatus("Voto registrado correctamente (ID_VOTE=" + idVote + ").", COLOR_EXITO);
+        secureTokenField.setText("");
+    }
+
+    @Override
+    public void showError(String message) {
+        setStatus(message, COLOR_ERROR);
     }
 
     private void setStatus(String message, Color color) {
@@ -179,6 +193,9 @@ public class VotingFrame extends javax.swing.JFrame {
     }
 
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> new VotingFrame().setVisible(true));
+        SwingUtilities.invokeLater(() -> {
+            VotingFrame frame = com.evotesys.CompositionRoot.buildVotingFrame();
+            frame.setVisible(true);
+        });
     }
 }

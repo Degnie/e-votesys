@@ -1,48 +1,73 @@
 package com.evotesys.util;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Properties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
- * Singleton: single access point for the Oracle connection. Only DAO classes should use this;
- * UI/controller classes must not know about JDBC or where the credentials are stored.
+ * Singleton: single access point for the Oracle connection pool. Only DAO classes should use
+ * this; UI/controller classes must not know about JDBC, HikariCP or where the credentials are
+ * stored. Credentials come from environment variables (DB_URL, DB_USER, DB_PASSWORD) first;
+ * config.properties is only a local-dev fallback when those are unset.
  */
 public final class DatabaseConnection {
 
+    private static final Logger LOG = LoggerFactory.getLogger(DatabaseConnection.class);
     private static final String CONFIG_FILE = "config.properties";
     private static DatabaseConnection instance;
 
-    private final String url;
-    private final String user;
-    private final String password;
+    private final HikariDataSource dataSource;
 
     private DatabaseConnection() {
+        Properties fallback = loadFallbackProperties();
+
+        String url = firstNonBlank(System.getenv("DB_URL"), fallback.getProperty("db.url"));
+        String user = firstNonBlank(System.getenv("DB_USER"), fallback.getProperty("db.user"));
+        String password = firstNonBlank(System.getenv("DB_PASSWORD"), fallback.getProperty("db.password"));
+
+        if (url == null || user == null || password == null) {
+            throw new IllegalStateException(
+                "Missing Oracle credentials. Set DB_URL/DB_USER/DB_PASSWORD environment variables, "
+                    + "or provide config.properties as a fallback.");
+        }
+
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(url);
+        config.setUsername(user);
+        config.setPassword(password);
+        config.setDriverClassName("oracle.jdbc.OracleDriver");
+        config.setPoolName("evotesys-pool");
+        config.setMaximumPoolSize(10);
+        config.setMinimumIdle(2);
+        config.setConnectionTimeout(10_000);
+
+        this.dataSource = new HikariDataSource(config);
+        LOG.info("Oracle connection pool initialized (pool={}, url={})", config.getPoolName(), url);
+    }
+
+    private static Properties loadFallbackProperties() {
         Properties props = new Properties();
         try (InputStream in = DatabaseConnection.class.getClassLoader().getResourceAsStream(CONFIG_FILE)) {
-            if (in == null) {
-                throw new IllegalStateException(
-                    CONFIG_FILE + " not found on the classpath. Copy config.properties.example "
-                        + "into the NetBeans project source root, rename it to config.properties "
-                        + "and fill in your Oracle credentials.");
+            if (in != null) {
+                props.load(in);
             }
-            props.load(in);
         } catch (IOException e) {
-            throw new IllegalStateException("Could not read " + CONFIG_FILE, e);
+            LOG.warn("Could not read {} fallback file", CONFIG_FILE, e);
         }
+        return props;
+    }
 
-        this.url = props.getProperty("db.url");
-        this.user = props.getProperty("db.user");
-        this.password = props.getProperty("db.password");
-
-        try {
-            Class.forName("oracle.jdbc.OracleDriver");
-        } catch (ClassNotFoundException e) {
-            throw new IllegalStateException("ojdbc driver not found on the classpath. Add ojdbc8.jar (or newer) to the project libraries.", e);
+    private static String firstNonBlank(String primary, String secondary) {
+        if (primary != null && !primary.isBlank()) {
+            return primary;
         }
+        return (secondary != null && !secondary.isBlank()) ? secondary : null;
     }
 
     public static synchronized DatabaseConnection getInstance() {
@@ -52,8 +77,8 @@ public final class DatabaseConnection {
         return instance;
     }
 
-    // Each DAO requests its own connection and closes it in its own try-with-resources.
+    // Each DAO borrows its own connection from the pool and closes it in its own try-with-resources.
     public Connection getConnection() throws SQLException {
-        return DriverManager.getConnection(url, user, password);
+        return dataSource.getConnection();
     }
 }

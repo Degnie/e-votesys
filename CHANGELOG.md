@@ -1,5 +1,74 @@
 # Changelog
 
+## [Sin publicar] - 2026-07-16 (iteración 7: arquitectura profesional de la capa Java)
+
+El objetivo de esta iteración fue elevar la capa Java a estándares profesionales sin tocar
+`PKG_VOTING`/`TRG_VOTE_IMMUTABLE` ni ninguna otra regla de negocio en Oracle (RN01-RN07 siguen
+validándose 100% del lado de la base de datos).
+
+### Baseline y empaquetado (`pom.xml`)
+
+- Subí `maven.compiler.source`/`target` de 8 a 17.
+- Agregué `HikariCP` (pool de conexiones), `slf4j-api` + `logback-classic` (logging transaccional).
+- Configuré `maven-shade-plugin` para generar un Fat JAR ejecutable en `package`.
+
+### Conexión (`util/DatabaseConnection.java`)
+
+Reemplacé `DriverManager` por `HikariDataSource`. Las credenciales ahora se leen primero de
+variables de entorno (`DB_URL`/`DB_USER`/`DB_PASSWORD`); `config.properties` queda solo como
+fallback para desarrollo local si esas variables no están seteadas.
+
+### Capa de servicio (`service/VotingService.java` + excepciones)
+
+Antes, `VotingFrame` capturaba `SQLException` directo y mostraba el mensaje `ORA-2000x` crudo en
+pantalla. Ahora `VotingService` es el intermediario obligatorio entre la UI y `VoteDAO`/`ElectionDAO`/
+`CandidateDAO`: traduce cada código de `PKG_VOTING` a una excepción de negocio legible
+(`NotEnrolledException`=RN01/ORA-20001, `AlreadyVotedException`=RN02/ORA-20002,
+`InvalidElectionStateException`=ORA-20003, `InvalidCandidateException`=ORA-20004) y registra cada
+intento de voto (aceptado o rechazado) con slf4j. Ninguna `SQLException` cruza hacia `ui/`.
+
+### DTO + MVC pasivo (`service/VoteRequestDTO.java`, `controller/VotingController.java`)
+
+`Vote` (modelo) quedó exclusivamente para uso del DAO; `VoteRequestDTO` transporta la intención del
+usuario (elección, candidato, secure token) desde la vista hacia el servicio. Extraje toda la
+orquestación (llamar al servicio, decidir qué mostrar) a `VotingController`; `VotingFrame` implementa
+la interfaz `ui/VotingView` y quedó como vista puramente declarativa: solo dispara eventos y expone
+métodos para que el controller la actualice (`showElections`, `showCandidates`, `showVoteSuccess`,
+`showError`, `setLoading`). `CompositionRoot.java` es ahora el único lugar del proyecto donde se
+instancian los DAOs (`new *DAOImpl()` ya no aparece ni en `VotingFrame` ni en `VotingService`).
+
+### Asincronía (`VotingFrame.java`, `VotingController.java`)
+
+Las tres operaciones que tocan Oracle (`loadElections`, `loadCandidatesForElection`, `castVote`) se
+ejecutan ahora dentro de `SwingWorker`, nunca en el Event Dispatch Thread. Mientras corren, el
+controller llama a `view.setLoading(true, "...")`, que deshabilita el combo/lista/botón/campo de
+token y muestra un texto de progreso, y los reactiva al terminar (`done()`).
+
+### Mitigación de suplantación de identidad (`VotingFrame.java`, `service/SecureTokenParser.java`)
+
+Reemplacé el campo de texto libre "ID Votante" (numérico, tipiado a mano) por un campo "Secure
+Token" con formato simulado `SVT-<voterId>-<nonce>`. `SecureTokenParser` es el único punto que
+extrae el `voterId` del token — la UI ya no le pasa un ID crudo y no verificado a la capa de
+servicio, demostrando el principio de que la vista no debe confiar en un identificador tipiado
+directamente.
+
+### Refuerzo criptográfico (`sql/plsql/03_pkg_voting.sql`)
+
+`PKG_VOTING.cast_vote` generaba el `HASH_CODE` del voto con `DBMS_RANDOM.STRING`, un PRNG de
+propósito general, no apto para uso criptográfico. Lo reemplacé por
+`DBMS_CRYPTO.RANDOMBYTES(16)` (vía `RAWTOHEX`) para que la sal que entra al `STANDARD_HASH` tenga
+entropía de grado criptográfico. Requiere `GRANT EXECUTE ON DBMS_CRYPTO TO EVOTESYS` una sola vez
+(documentado en el propio script).
+
+### Deuda técnica pospuesta
+
+Quedan fuera de esta iteración, para una futura ronda de arquitectura avanzada:
+
+- **Rate limiting** sobre `castVote`/`SP_REGISTER_VOTE` (mitigación de fuerza bruta/DoS contra el
+  endpoint de votación) — hoy no hay ningún límite de intentos por token/IP a nivel aplicativo.
+- **Merkle Tree** para encadenar los votos de una elección y poder probar su integridad agregada de
+  forma verificable, más allá del hash individual por voto que ya genera `PKG_VOTING.cast_vote`.
+
 ## [Sin publicar] - 2026-07-15 (iteración 6: boleta más visual + fix de "Run Project")
 
 Quería que la boleta se sintiera más parecida a una vista real en vez de solo mostrar resultados en
