@@ -1,6 +1,6 @@
 # E-VoteSys — Plataforma Integral de Gestión de Votación Electrónica
 
-> Documento de handoff técnico (Entregable Parcial II → Fase de implementación).
+> Handoff técnico (Fase de implementación).
 > Motor de base de datos objetivo: **Oracle Database** · Lógica de negocio en **PL/SQL**.
 
 ## 1. Contexto del proyecto
